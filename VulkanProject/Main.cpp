@@ -1,6 +1,9 @@
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
 
+#define TINYOBJLOADER_IMPLEMENTATION
+#include <tiny_obj_loader.h>
+
 // 计算时强制使用弧度值
 #define GLM_FORCE_RADIANS
 // opengl的深度值是从-1~1，我们需要转换深度值为0~1
@@ -12,6 +15,9 @@
 #define STB_IMAGE_IMPLEMENTATION
 #include <stb_image.h>
 
+#define GLM_ENABLE_EXPERIMENTAL
+#include <glm/gtx/hash.hpp>
+
 #include <iostream>
 #include <vector>
 #include <array>
@@ -20,12 +26,17 @@
 #include <algorithm>
 #include <fstream>
 #include <chrono>
+#include <unordered_map>
+
 
 const std::vector<const char*> validationLayers = { "VK_LAYER_KHRONOS_validation" };
 const std::vector<const char*> deviceExtensions = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
 
 const uint32_t WIDTH = 800;
 const uint32_t HEIGHT = 600;
+
+const std::string MODEL_PATH = "viking_room.obj";
+const std::string TEXTURE_PATH = "viking_room.png";
 
 const uint32_t MAX_FRAMES_IN_FLIGHT = 2;
 
@@ -112,9 +123,27 @@ struct Vertex
 
         return attributeDesc;
     }
+
+    bool operator==(const Vertex& other) const
+    {
+        return pos == other.pos && color == other.color && texCoord == other.texCoord;
+    }
 };
 
-const std::vector<Vertex> vertices =
+namespace std
+{
+    template<> struct hash<Vertex>
+    {
+        size_t operator()(Vertex const& vertex) const
+        {
+            return ((hash<glm::vec3>()(vertex.pos) ^
+                (hash<glm::vec3>()(vertex.color) << 1)) >> 1) ^
+                (hash<glm::vec2>()(vertex.texCoord) << 1);
+        }
+    };
+}
+
+/*const std::vector<Vertex> vertices =
 {
    {{-0.5f, -0.5f, 0.0f}, {1.0f, 0.0f, 0.0f}, {0.0f, 0.0f}},
     {{0.5f, -0.5f, 0.0f}, {0.0f, 1.0f, 0.0f}, {1.0f, 0.0f}},
@@ -127,10 +156,11 @@ const std::vector<Vertex> vertices =
     {{-0.5f, 0.5f, -0.5f}, {1.0f, 1.0f, 1.0f}, {0.0f, 1.0f}}
 };
 
-const std::vector<uint16_t> indices = {
+const std::vector<uint16_t> indices =
+{
     0, 1, 2, 2, 3, 0,
     4, 5, 6, 6, 7, 4
-};
+};*/
 
 class NewWindow
 {
@@ -188,6 +218,10 @@ private:
 
     std::vector<VkDescriptorSet> descriptorSets;
 
+    std::vector<Vertex> vertices;
+    std::vector<uint32_t> indices;
+
+
     bool framebufferResized = false;
 
     void initWindow()
@@ -224,6 +258,7 @@ private:
         createTextureImage();
         createTextureImageView();
         createTextureSampler();
+        loadModel();
         createVertexBuffer();
         createIndexBuffer();
         createUniformBuffers();
@@ -1007,7 +1042,7 @@ private:
     void createTextureImage()
     {
         int texWidth, texHeight, texChannels;
-        stbi_uc* pixels = stbi_load("texture.jpg", &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
+        stbi_uc* pixels = stbi_load(TEXTURE_PATH.c_str(), &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
         VkDeviceSize imageSize = texWidth * texHeight * 4; // 像素按rgba4字节分布
 
         if (!pixels)
@@ -1159,6 +1194,49 @@ private:
         vkCmdCopyBuffer(commandBuffer, srcBuffer, dstBuffer, 1, &copyRegion);
 
         endSingleTimeCommands(commandBuffer);
+    }
+
+    void loadModel()
+    {
+        tinyobj::attrib_t attrib;
+        std::vector<tinyobj::shape_t> shapes;
+        std::vector<tinyobj::material_t> materials;
+        std::string warn, err;
+
+        if (!tinyobj::LoadObj(&attrib, &shapes, &materials, &warn, &err, MODEL_PATH.c_str()))
+            throw std::runtime_error(warn + err);
+
+        std::unordered_map<Vertex, uint32_t> uniqueVertices{};
+
+        for (const auto& shape : shapes)
+        {
+            for (const auto& index : shape.mesh.indices)
+            {
+                Vertex vertex{};
+                vertex.pos = 
+                {
+                    attrib.vertices[3 * index.vertex_index + 0],
+                    attrib.vertices[3 * index.vertex_index + 1],
+                    attrib.vertices[3 * index.vertex_index + 2]
+                };
+
+                vertex.texCoord = 
+                {
+                   attrib.texcoords[2 * index.texcoord_index + 0],
+                   1.0f - attrib.texcoords[2 * index.texcoord_index + 1]
+                };
+
+                vertex.color = { 1.0f, 1.0f, 1.0f };
+
+                if (uniqueVertices.count(vertex) == 0)
+                {
+                    uniqueVertices[vertex] = static_cast<uint32_t>(vertices.size());
+                    vertices.push_back(vertex);
+                }
+
+                indices.push_back(uniqueVertices[vertex]);
+            }
+        }
     }
 
     void createVertexBuffer()
@@ -1352,7 +1430,7 @@ private:
         VkBuffer vertexBuffers[] = { vertexBuffer };
         VkDeviceSize offsets[] = { 0 };
         vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
-        vkCmdBindIndexBuffer(commandBuffer, indexBuffer, 0, VK_INDEX_TYPE_UINT16);
+        vkCmdBindIndexBuffer(commandBuffer, indexBuffer, 0, VK_INDEX_TYPE_UINT32);
         vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &descriptorSets[currentFrame], 0, nullptr);
 
         // vkCmdDraw(commandBuffer, static_cast<uint32_t>(vertices.size()), 1, 0, 0);
